@@ -182,6 +182,17 @@ function maxIsoDate(input: (string | null | undefined)[]): string | null {
   return max;
 }
 
+function sanitizeOfficialFundName(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const sanitized = value
+    .replace(/\s*<%\([^)]*\)%>\s*$/g, "")
+    .replace(/\s*[#*]+\s*$/g, "")
+    .trim();
+  return sanitized.length > 0 ? sanitized : null;
+}
+
 function parseMpfDate(value: string): string {
   const [dd, mm, yyyy] = value.split("-");
   if (!dd || !mm || !yyyy) {
@@ -899,11 +910,14 @@ export const mpfRouter = {
               fundCode: fund.fundCode,
               fundIdentifier: fund.fundIdentifier,
               fundNameEn:
-                fund.fundNames.find((name) => name.languageCode === "en_US")
-                  ?.value ?? fund.fundCode,
-              fundNameZhHk: fund.fundNames.find(
-                (name) => name.languageCode === "zh_HK",
-              )?.value,
+                sanitizeOfficialFundName(
+                  fund.fundNames.find((name) => name.languageCode === "en_US")
+                    ?.value,
+                ) ?? fund.fundCode,
+              fundNameZhHk: sanitizeOfficialFundName(
+                fund.fundNames.find((name) => name.languageCode === "zh_HK")
+                  ?.value,
+              ),
               riskLevel: fund.riskLevelValue,
               disFundIndicator: Boolean(fund.disFundIndicator),
               disRelatedFundCode: fund.disRelatedFundCode,
@@ -1275,11 +1289,14 @@ export const mpfRouter = {
               fundCode: fund.fundCode,
               fundIdentifier: fund.fundIdentifier,
               fundNameEn:
-                fund.fundNames.find((name) => name.languageCode === "en_US")
-                  ?.value ?? fund.fundCode,
-              fundNameZhHk: fund.fundNames.find(
-                (name) => name.languageCode === "zh_HK",
-              )?.value,
+                sanitizeOfficialFundName(
+                  fund.fundNames.find((name) => name.languageCode === "en_US")
+                    ?.value,
+                ) ?? fund.fundCode,
+              fundNameZhHk: sanitizeOfficialFundName(
+                fund.fundNames.find((name) => name.languageCode === "zh_HK")
+                  ?.value,
+              ),
               riskLevel: fund.riskLevelValue,
               disFundIndicator: Boolean(fund.disFundIndicator),
               disRelatedFundCode: fund.disRelatedFundCode,
@@ -1628,7 +1645,9 @@ export const mpfRouter = {
           .values(
             selectedFunds.map((fund) => {
               const product = fund.products?.[0];
-              const displayName = fund.fundNameEn ?? fund.fundName ?? fund.displayName;
+              const displayName = sanitizeOfficialFundName(
+                fund.fundNameEn ?? fund.fundName ?? fund.displayName,
+              );
               return {
                 trustee: "manulife" as const,
                 schemeCode,
