@@ -1,0 +1,17 @@
+{
+  "name": "mpf-etl-orchestrator-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "@cloudflare/puppeteer": "^1.0.6"
+  },
+  "devDependencies": {
+    "wrangler": "^4.54.0"
+  }
+}
+

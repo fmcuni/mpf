@@ -53,3 +53,7 @@ dist/
 
 # tanstack
 .tanstack
+
+# cloudflare workers local config/state
+cloudflare/**/wrangler.toml
+cloudflare/**/.wrangler

@@ -39,7 +39,13 @@ export const MpfIngestionStatus = pgEnum("mpf_ingestion_status", [
   "failed",
 ]);
 
-export const MpfTrustee = pgEnum("mpf_trustee", ["hsbc", "manulife", "hangseng"]);
+export const MpfTrustee = pgEnum("mpf_trustee", [
+  "aia",
+  "hsbc",
+  "manulife",
+  "hangseng",
+  "sunlife",
+]);
 
 export const MpfCategoryNav = pgTable(
   "mpf_category_nav",

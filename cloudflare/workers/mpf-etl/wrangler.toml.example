@@ -1,0 +1,23 @@
+name = "mpf-etl-orchestrator"
+main = "src/index.ts"
+compatibility_date = "2026-02-26"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[triggers]
+# 02:35 UTC = 10:35 HKT, once daily.
+crons = ["35 2 * * *"]
+
+[vars]
+# Set per source if you need temporary isolation / rollback.
+ENABLE_AIA_ETL = "true"
+ENABLE_HSBC_ETL = "true"
+ENABLE_HANGSENG_ETL = "true"
+ENABLE_MANULIFE_ETL = "true"
+ENABLE_SUNLIFE_BROWSER_ETL = "true"
+
+[browser]
+binding = "MYBROWSER"
+
+[observability]
+enabled = true

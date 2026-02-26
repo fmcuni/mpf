@@ -2,6 +2,7 @@ packages:
   - apps/*
   - packages/*
   - tooling/*
+  - cloudflare/workers/*
 
 catalog:
   "@better-auth/cli": 1.4.0-beta.9

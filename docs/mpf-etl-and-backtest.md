@@ -1,20 +1,17 @@
-# MPF Server Logic and ETL (MPFA Official Dataset)
+# MPF Server Logic and ETL (Trustee-Level Feeds)
 
 ## Scope
 
-This implementation uses MPFA official dataset:
-
-- `net_asset_values_of_approved_constituent_funds02_en.csv`
-
-The dataset contains **category-level NAV totals** (HKD million), not individual fund unit prices.
+This implementation uses trustee-level fund feeds for individual fund prices and metadata.
 
 ## Data Model
 
 Tables added in `packages/db/src/schema.ts`:
 
-- `mpf_category_nav`
-  - Key: `(as_of_date, category)`
-  - Stores NAV series by category.
+- `mpf_fund`
+  - Trustee/scheme/fund metadata with official EN + ZH-HK names.
+- `mpf_fund_price`
+  - Daily fund price rows keyed by `(fund_id, price_date)`.
 - `mpf_ingestion_run`
   - ETL run history, status, row counts, and payload hash.
 - `mpf_contribution`
@@ -22,51 +19,39 @@ Tables added in `packages/db/src/schema.ts`:
 
 ## ETL Flow
 
-`mpf.ingestOfficialDataset`:
+Cloudflare Worker orchestrator:
 
 1. Insert `running` row in `mpf_ingestion_run`.
-2. Fetch MPFA CSV.
-3. Parse and map columns to internal categories.
-4. Upsert to `mpf_category_nav`.
+2. Fetch each trustee source (HSBC, Hang Seng, Manulife, Sun Life browser flow).
+3. Normalize fund metadata and latest valuation date rows.
+4. Upsert to `mpf_fund` and `mpf_fund_price`.
 5. Mark ingestion run `success` (or `failed` with error).
 
-## Scheduled Job (Supabase Edge Function + Cron)
+## Scheduled Job (Cloudflare Worker Cron)
 
-Files:
+ETL orchestration now runs on Cloudflare Worker Cron, with Supabase as storage.
 
-- `supabase/functions/mpf-ingest/index.ts`
-- `supabase/migrations/20260226124136_schedule_mpf_ingest.sql`
+Worker docs:
 
-Deploy and schedule:
+- `docs/cloudflare-etl-setup.md`
 
-1. `supabase functions deploy mpf-ingest`
-2. Save required vault secrets:
-   - `project_url` = `https://<project-ref>.supabase.co`
-   - `service_role_key` = your Supabase service role key
-3. Run migration to create the cron job.
+Schedule:
 
-Schedule configured in migration:
+- Daily at `02:35 UTC` (`10:35 HKT`) via Worker cron trigger.
 
-- Daily check at `02:35 UTC` (`10:35 HKT`).
-- Job is idempotent by CSV hash (`payload_hash`), so unchanged data is skipped.
+Jobs in Cloudflare Worker:
 
-## Compare Logic
-
-`mpf.compare`:
-
-- Filters by categories/date range.
-- Returns NAV and cumulative return from first data point for each category.
+- AIA trustee metadata sync
+- HSBC latest fund prices
+- Hang Seng latest fund prices
+- Manulife latest fund prices
+- Sun Life latest fund prices (browser session adapter, no fallback source)
 
 ## Backtest + XIRR Logic
 
 `mpf.backtest`:
 
-- Accepts category weights, initial amount, date range, optional synthetic monthly contribution.
+- Accepts fund allocations, initial amount, date range, optional synthetic monthly contribution.
 - Optionally merges saved user contributions from `mpf_contribution`.
-- Computes portfolio path based on weighted category-period returns.
+- Computes portfolio path based on weighted fund-period returns.
 - Computes XIRR from contribution cashflows and terminal portfolio value.
-
-## Important Limitation
-
-MPFA official dataset here is NAV totals, which are influenced by both market movement and net contributions/withdrawals.
-So this backtest is a **macro proxy**, not a strict pure price-return backtest at constituent-fund level.

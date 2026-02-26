@@ -27,6 +27,9 @@ const MANULIFE_FUNDS_LIST_API_URL =
   "https://www.manulife.com.hk/bin/funds/fundslist?productLine=mpf&overrideLocale=en_HK";
 const MANULIFE_FUND_HISTORY_API_BASE =
   "https://www.manulife.com.hk/bin/funds/fundhistory";
+const MPFA_MPP_LIST_EN_URL = "https://mfp.mpfa.org.hk/eng/mpp_list.jsp";
+const MPFA_MPP_LIST_ZH_HK_URL = "https://mfp.mpfa.org.hk/tch/mpp_list.jsp";
+const MPFA_SUNLIFE_TRUSTEE_ID = "17";
 const HSBC_API_HEADERS = {
   "x-hsbc-channel-id": "WEB",
   client_id: "5eca677638ab454086052a18da4e2cb0",
@@ -97,6 +100,43 @@ function parseCsv(content: string): string[][] {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map(parseCsvLine);
+}
+
+function stripHtmlTags(input: string): string {
+  return input
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseMpfaFundRows(html: string): {
+  cfId: string;
+  schemeName: string | null;
+  fundName: string | null;
+}[] {
+  const rows: { cfId: string; schemeName: string | null; fundName: string | null }[] = [];
+  const rowRegex = /<tr class="wr"[\s\S]*?<\/tr>/g;
+  const cfIdRegex = /name="sortlist_checkbox"[\s\S]*?value="(\d+)"/;
+  const schemeRegex = /class="txt">([\s\S]*?)<\/td>/;
+  const fundRegex = /class="table">([\s\S]*?)<\/td>/;
+  const rowBlocks = html.match(rowRegex) ?? [];
+
+  for (const row of rowBlocks) {
+    const cfId = cfIdRegex.exec(row)?.[1];
+    const schemeRaw = schemeRegex.exec(row)?.[1];
+    const fundRaw = fundRegex.exec(row)?.[1];
+    if (!cfId) {
+      continue;
+    }
+
+    const schemeName = sanitizeOfficialFundName(stripHtmlTags(schemeRaw ?? ""));
+    const fundName = sanitizeOfficialFundName(stripHtmlTags(fundRaw ?? ""));
+    rows.push({ cfId, schemeName, fundName });
+  }
+
+  return rows;
 }
 
 function addDays(date: Date, days: number): Date {
@@ -1939,6 +1979,225 @@ export const mpfRouter = {
         fund: {
           fundId: fund.fundCode,
           fundNameEn: fund.fundNameEn,
+          riskLevel: fund.riskLevel,
+        },
+        prices: prices.map((row) => ({
+          priceDate: toIsoDate(row.priceDate),
+          bidPrice: row.bidPrice,
+          offerPrice: row.offerPrice,
+          currencyCode: row.currencyCode,
+          source: row.source,
+        })),
+      };
+    }),
+
+  ingestSunLifeFunds: protectedProcedure
+    .input(
+      z
+        .object({
+          fundIds: z.array(z.string().min(1)).optional(),
+        })
+        .optional(),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const run = await ctx.db
+        .insert(MpfIngestionRun)
+        .values({
+          sourceUrl: MPFA_MPP_LIST_EN_URL,
+          status: "running",
+        })
+        .returning({ id: MpfIngestionRun.id });
+
+      const runId = run[0]?.id;
+      if (!runId) {
+        throw new Error("Failed to create Sun Life ingestion run.");
+      }
+
+      try {
+        const formBody = new URLSearchParams({ trustees: MPFA_SUNLIFE_TRUSTEE_ID });
+        const [enResponse, zhHkResponse] = await Promise.all([
+          fetch(MPFA_MPP_LIST_EN_URL, {
+            method: "POST",
+            body: formBody,
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+          }),
+          fetch(MPFA_MPP_LIST_ZH_HK_URL, {
+            method: "POST",
+            body: formBody,
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+          }),
+        ]);
+
+        if (!enResponse.ok) {
+          throw new Error(
+            `Failed to fetch MPFA Sun Life EN list (${enResponse.status} ${enResponse.statusText})`,
+          );
+        }
+        if (!zhHkResponse.ok) {
+          throw new Error(
+            `Failed to fetch MPFA Sun Life ZH-HK list (${zhHkResponse.status} ${zhHkResponse.statusText})`,
+          );
+        }
+
+        const [enHtml, zhHkHtml] = await Promise.all([
+          enResponse.text(),
+          zhHkResponse.text(),
+        ]);
+
+        const enRows = parseMpfaFundRows(enHtml);
+        const zhHkRows = parseMpfaFundRows(zhHkHtml);
+        const zhHkByCfId = new Map(zhHkRows.map((row) => [row.cfId, row]));
+
+        const selectedIds = input?.fundIds?.length
+          ? new Set(input.fundIds.map((value) => value.trim()))
+          : null;
+        const selectedRows = enRows.filter((row) =>
+          selectedIds ? selectedIds.has(row.cfId) : true,
+        );
+
+        if (selectedRows.length === 0) {
+          throw new Error("No Sun Life funds matched the requested fund IDs.");
+        }
+
+        const values = selectedRows.map((row) => {
+          const zhHkRow = zhHkByCfId.get(row.cfId);
+          return {
+            trustee: "sunlife" as const,
+            schemeCode: "SLR",
+            schemeIdentifier: row.schemeName ?? "Sun Life Rainbow MPF Scheme",
+            fundCode: row.cfId,
+            fundIdentifier: row.cfId,
+            fundNameEn: row.fundName ?? `Sun Life Fund ${row.cfId}`,
+            fundNameZhHk: zhHkRow?.fundName ?? null,
+          };
+        });
+
+        await ctx.db.insert(MpfTrusteeFund).values(values).onConflictDoUpdate({
+          target: [
+            MpfTrusteeFund.trustee,
+            MpfTrusteeFund.schemeCode,
+            MpfTrusteeFund.fundCode,
+          ],
+          set: {
+            schemeIdentifier: sql`excluded.scheme_identifier`,
+            fundIdentifier: sql`excluded.fund_identifier`,
+            fundNameEn: sql`excluded.fund_name_en`,
+            fundNameZhHk: sql`excluded.fund_name_zh_hk`,
+            updatedAt: sql`now()`,
+          },
+        });
+
+        const payloadHash = createHash("sha256")
+          .update(`sunlife:${selectedRows.length}`)
+          .digest("hex");
+
+        await ctx.db
+          .update(MpfIngestionRun)
+          .set({
+            status: "success",
+            payloadHash,
+            rowsRead: selectedRows.length,
+            rowsUpserted: selectedRows.length,
+            completedAt: new Date(),
+          })
+          .where(eq(MpfIngestionRun.id, runId));
+
+        return {
+          trustee: "sunlife",
+          schemeCode: "SLR",
+          fundCount: selectedRows.length,
+          rowsRead: selectedRows.length,
+          rowsUpserted: selectedRows.length,
+          note: "MPFA source provides official fund list; historical daily NAV endpoint is not publicly available from Sun Life site due anti-bot protection.",
+        };
+      } catch (error) {
+        await ctx.db
+          .update(MpfIngestionRun)
+          .set({
+            status: "failed",
+            errorMessage:
+              error instanceof Error ? error.message : "Unknown Sun Life ingestion error",
+            completedAt: new Date(),
+          })
+          .where(eq(MpfIngestionRun.id, runId));
+        throw error;
+      }
+    }),
+
+  listSunLifeFunds: publicProcedure
+    .input(
+      z
+        .object({
+          search: z.string().min(1).optional(),
+          limit: z.number().int().min(1).max(300).default(200),
+        })
+        .optional(),
+    )
+    .query(async ({ ctx, input }) => {
+      const rows = await ctx.db
+        .select()
+        .from(MpfTrusteeFund)
+        .where(
+          and(eq(MpfTrusteeFund.trustee, "sunlife"), eq(MpfTrusteeFund.schemeCode, "SLR")),
+        )
+        .orderBy(asc(MpfTrusteeFund.fundCode));
+
+      const keyword = input?.search?.toLowerCase();
+      const filtered = keyword
+        ? rows.filter((row) =>
+            `${row.fundCode} ${row.fundNameEn} ${row.fundNameZhHk ?? ""}`
+              .toLowerCase()
+              .includes(keyword),
+          )
+        : rows;
+
+      return filtered.slice(0, input?.limit ?? 200);
+    }),
+
+  sunLifeFundPriceSeries: publicProcedure
+    .input(
+      z.object({
+        fundId: z.string().min(1),
+        fromDate: z.string().date().optional(),
+        toDate: z.string().date().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const [fund] = await ctx.db
+        .select()
+        .from(MpfTrusteeFund)
+        .where(
+          and(
+            eq(MpfTrusteeFund.trustee, "sunlife"),
+            eq(MpfTrusteeFund.schemeCode, "SLR"),
+            eq(MpfTrusteeFund.fundCode, input.fundId),
+          ),
+        )
+        .limit(1);
+
+      if (!fund) {
+        throw new Error(`Sun Life fund not found: ${input.fundId}`);
+      }
+
+      const whereClauses = [eq(MpfTrusteeFundPrice.fundId, fund.id)];
+      if (input.fromDate) {
+        whereClauses.push(gte(MpfTrusteeFundPrice.priceDate, input.fromDate));
+      }
+      if (input.toDate) {
+        whereClauses.push(lte(MpfTrusteeFundPrice.priceDate, input.toDate));
+      }
+
+      const prices = await ctx.db
+        .select()
+        .from(MpfTrusteeFundPrice)
+        .where(and(...whereClauses))
+        .orderBy(asc(MpfTrusteeFundPrice.priceDate));
+
+      return {
+        fund: {
+          fundId: fund.fundCode,
+          fundNameEn: fund.fundNameEn,
+          fundNameZhHk: fund.fundNameZhHk,
           riskLevel: fund.riskLevel,
         },
         prices: prices.map((row) => ({
